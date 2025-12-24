@@ -63,7 +63,6 @@ def find_patient(reg_no):
     if sheet:
         try:
             cell = sheet.find(str(reg_no))
-            # Get the whole row
             return sheet.row_values(cell.row)
         except:
             return None
@@ -78,7 +77,7 @@ def save_patient(reg_no, name, phone, last_rx, notes=""):
             # Update Existing
             sheet.update_cell(cell.row, 4, last_rx)
             sheet.update_cell(cell.row, 5, date_now)
-            sheet.update_cell(cell.row, 6, notes) # Save notes in Col F
+            sheet.update_cell(cell.row, 6, notes)
         except:
             # Create New: RegNo, Name, Phone, Rx, Date, Notes
             sheet.append_row([str(reg_no), name, str(phone), last_rx, date_now, notes])
@@ -86,7 +85,6 @@ def save_patient(reg_no, name, phone, last_rx, notes=""):
 # --- 3. AUDIO FUNCTIONS ---
 def speak_text(text):
     try:
-        # Only speak the first sentence to be fast
         short_text = text.split('.')[0]
         tts = gTTS(text=short_text, lang='hi', slow=False)
         audio_bytes = io.BytesIO()
@@ -101,9 +99,12 @@ def recognize_audio(audio_bytes):
         audio_file = io.BytesIO(audio_bytes)
         with sr.AudioFile(audio_file) as source:
             audio_data = r.record(source)
-            text = r.recognize_google(audio_data, language="hi-IN") # Hindi input
+            # Try Hindi first, fallback to English if needed (logic handled by Google usually)
+            text = r.recognize_google(audio_data, language="hi-IN") 
         return text
-    except:
+    except sr.UnknownValueError:
+        return "ERROR: Could not understand audio."
+    except Exception as e:
         return None
 
 # --- 4. SESSION STATE ---
@@ -114,14 +115,13 @@ if "patient_type" not in st.session_state: st.session_state.patient_type = "Chro
 # --- 5. APP FLOW ---
 
 st.image("https://cdn-icons-png.flaticon.com/512/3774/3774299.png", width=60) 
-st.markdown("<h2 style='text-align: center;'>Dr. Robot (Globule Goals)</h2>", unsafe_allow_html=True)
+st.markdown("<h2 style='text-align: center;'>Dr. Robot</h2>", unsafe_allow_html=True)
 
 # STEP 0: RECEPTION
 if st.session_state.step == 0:
     st.markdown('<p class="big-font">नमस्ते! इलाज शुरू करने के लिए चुनें।</p>', unsafe_allow_html=True)
-    
     c1, c2, c3 = st.columns(3)
-    if c1.button("नया (New Case)"):
+    if c1.button("नया (New)"):
         st.session_state.patient_type = "Chronic"
         st.session_state.step = 1
         st.rerun()
@@ -134,12 +134,11 @@ if st.session_state.step == 0:
         st.session_state.step = 1
         st.rerun()
 
-# STEP 1: REGISTRATION / LOOKUP
+# STEP 1: REGISTRATION
 if st.session_state.step == 1:
     if st.session_state.patient_type in ["Chronic", "Acute"]:
         st.markdown('<p class="big-font">नाम और नंबर बताएं</p>', unsafe_allow_html=True)
         reg_no = datetime.now().strftime("%d%H%M")
-        
         with st.form("new_pt"):
             name = st.text_input("Name")
             phone = st.text_input("Mobile")
@@ -148,27 +147,22 @@ if st.session_state.step == 1:
                 save_patient(reg_no, name, phone, "Started")
                 st.session_state.step = 2
                 st.rerun()
-                
-    else: # OLD PATIENT LOGIC
+    else: 
         st.markdown('<p class="big-font">रजिस्ट्रेशन नंबर लिखें</p>', unsafe_allow_html=True)
         reg_input = st.text_input("Reg No:")
         if st.button("Search"):
             data = find_patient(reg_input)
             if data:
-                # Load Data
                 st.session_state.case_data = {
-                    "RegNo": data[0], 
-                    "Name": data[1], 
-                    "Phone": data[2], 
-                    "LastRx": data[3] if len(data) > 3 else "None"
+                    "RegNo": data[0], "Name": data[1], 
+                    "Phone": data[2], "LastRx": data[3] if len(data) > 3 else "None"
                 }
-                st.success(f"Found: {data[1]}")
-                st.session_state.step = 15 # Go to Follow-up
+                st.session_state.step = 15 # Follow-up
                 st.rerun()
             else:
                 st.error("Patient Not Found")
 
-# STEP 2-8: MAIN INTERVIEW (New/Acute)
+# STEP 2-8: MAIN INTERVIEW (FIXED LOGIC)
 steps_map = {
     2: "मुख्य समस्या क्या है? (Chief Complaint)",
     3: "यह कब शुरू हुआ? (Onset)",
@@ -185,64 +179,71 @@ if 2 <= st.session_state.step <= last_step:
     current_q = steps_map[st.session_state.step]
     st.markdown(f'<p class="big-font">{current_q}</p>', unsafe_allow_html=True)
     
-    # Text Input Backup (Because Audio fails on mobile sometimes)
-    text_input = st.chat_input("Type answer here if mic fails...")
+    # 1. TEXT INPUT
+    text_input = st.chat_input("Type answer here...")
     
-    # Audio Input
+    # 2. AUDIO INPUT
     audio = mic_recorder(start_prompt="🎤 Speak", stop_prompt="⏹ Stop", key=f"mic_{st.session_state.step}")
     
-    user_response = None
+    # LOGIC: Check inputs
+    final_input = None
     
+    # Priority to Text
     if text_input:
-        user_response = text_input
-    elif audio:
-        user_response = recognize_audio(audio['bytes'])
+        final_input = text_input
     
-    if user_response:
-        st.markdown(f'<p class="user-text">{user_response}</p>', unsafe_allow_html=True)
-        st.session_state.case_data[f"Q{st.session_state.step}"] = user_response
+    # Process Audio if Text is empty
+    elif audio:
+        # Check if we already processed this exact audio ID to avoid loops
+        if audio['id'] != st.session_state.get('last_audio_id'):
+            st.session_state.last_audio_id = audio['id']
+            recognized_text = recognize_audio(audio['bytes'])
+            
+            if recognized_text and "ERROR" not in recognized_text:
+                final_input = recognized_text
+                st.success(f"Heard: {final_input}")
+            else:
+                st.warning("Could not understand audio. Please Type.")
+    
+    # 3. AUTO ADVANCE (If we have an answer)
+    if final_input:
+        st.session_state.case_data[f"Q{st.session_state.step}"] = final_input
+        st.session_state.step += 1 # Move to next step
         
-        # Next Button Logic
-        if st.button("Next Question ->", type="primary"):
-            st.session_state.step += 1
-            # Check if done
-            is_done = (st.session_state.patient_type == "Acute" and st.session_state.step > 5) or (st.session_state.step > 8)
-            if is_done:
-                st.session_state.step = 10 # Go to Camera
-            st.rerun()
+        # Check if finished
+        is_done = (st.session_state.patient_type == "Acute" and st.session_state.step > 5) or (st.session_state.step > 8)
+        if is_done:
+            st.session_state.step = 10 # Camera
+        
+        st.rerun() # Refresh immediately
 
-# STEP 15: FOLLOW-UP (SPECIAL KEYNOTE LOGIC)
+# STEP 15: FOLLOW-UP
 if st.session_state.step == 15:
     name = st.session_state.case_data.get('Name')
     last_rx = st.session_state.case_data.get('LastRx')
-    
     st.markdown(f'<p class="big-font">Welcome back {name}.<br>Last Medicine: {last_rx}</p>', unsafe_allow_html=True)
     
-    # A. General Update
-    st.write("1. दवा लेने के बाद कैसा महसूस हुआ? (General Update)")
+    st.write("1. दवा लेने के बाद कैसा महसूस हुआ?")
     fu_gen = st.text_input("Answer 1")
     
-    # B. AI Generates KEYNOTE QUESTIONS based on Last Rx
     if "keynote_q" not in st.session_state:
-        with st.spinner("Analyzing Last Prescription..."):
-            prompt = f"Patient took {last_rx}. Create 1 simple 'Yes/No' question in Hindi based on the Keynote of this remedy to check if the symptom still exists."
+        with st.spinner("Thinking..."):
+            prompt = f"Patient took {last_rx}. Create 1 'Yes/No' question in Hindi based on Keynote."
             res = model.generate_content(prompt)
             st.session_state.keynote_q = res.text
             
-    st.write(f"2. Specific Check: {st.session_state.keynote_q}")
-    fu_keynote = st.text_input("Answer 2 (Yes/No)")
+    st.write(f"2. {st.session_state.keynote_q}")
+    fu_keynote = st.text_input("Answer 2")
     
     if st.button("Analyze Follow-up"):
-        if fu_gen:
-            st.session_state.case_data["FollowUp_Report"] = f"General: {fu_gen}. Keynote Check ({st.session_state.keynote_q}): {fu_keynote}"
-            st.session_state.step = 11 # Go to Analysis
-            st.rerun()
+        st.session_state.case_data["FollowUp_Report"] = f"General: {fu_gen}. Keynote: {fu_keynote}"
+        st.session_state.step = 11
+        st.rerun()
 
 # STEP 10: CAMERA
 if st.session_state.step == 10:
-    st.markdown('<p class="big-font">जीभ या चेहरे की फोटो (Tongue/Face)</p>', unsafe_allow_html=True)
+    st.markdown('<p class="big-font">जीभ/चेहरा दिखाएं (Tongue/Face)</p>', unsafe_allow_html=True)
     img = st.camera_input("Camera")
-    
     c1, c2 = st.columns(2)
     if img:
         st.session_state.case_data["Img"] = img
@@ -253,57 +254,32 @@ if st.session_state.step == 10:
         st.session_state.step = 11
         st.rerun()
 
-# STEP 11: FINAL ANALYSIS
+# STEP 11: FINAL RX
 if st.session_state.step == 11:
     st.markdown('<p class="big-font">Dr. Robot Thinking...</p>', unsafe_allow_html=True)
-    
-    if "final_rx" not in st.session_state:
-        with st.spinner("Analyzing Miasms & Rubrics..."):
-            
-            # Prepare Data
+    if "final_rx_text" not in st.session_state:
+        with st.spinner("Analyzing..."):
             pt_data = str(st.session_state.case_data)
             has_img = st.session_state.case_data.get("Img") is not None
-            
-            prompt = f"""
-            You are an expert Homeopath.
-            Analyze this case carefully.
-            
-            PATIENT DATA: {pt_data}
-            
-            TASK:
-            1. Analyze the Mental & Physical Generals.
-            2. If this is a Follow-up, decide if the remedy needs to be repeated (Placebo/SL) or changed based on the Keynote answer.
-            3. Suggest ONE Final Remedy with Potency and Dosage.
-            4. Explain WHY in simple Hindi/English mix.
-            """
-            
+            prompt = f"Act as Homeopath. Patient Data: {pt_data}. Suggest 1 Remedy, Potency, Dosage & Reason (Hindi/English)."
             try:
                 if has_img:
                     img_file = PIL.Image.open(st.session_state.case_data["Img"])
                     response = model.generate_content([prompt, img_file])
                 else:
                     response = model.generate_content(prompt)
-                
                 st.session_state.final_rx_text = response.text
                 
-                # Extract Remedy Name (First line usually)
-                rx_short = response.text.splitlines()[0]
-                save_patient(
-                    st.session_state.case_data["RegNo"],
-                    st.session_state.case_data.get("Name"),
-                    st.session_state.case_data.get("Phone"),
-                    rx_short,
-                    notes=response.text[:200]
-                )
-                
+                # Save
+                rx_short = response.text.splitlines()[0][:50]
+                save_patient(st.session_state.case_data["RegNo"], st.session_state.case_data.get("Name"), st.session_state.case_data.get("Phone"), rx_short, notes=response.text[:200])
             except Exception as e:
                 st.session_state.final_rx_text = f"Error: {e}"
 
-    st.success("Prescription Generated!")
+    st.success("Prescription Ready!")
     st.write(st.session_state.final_rx_text)
-    speak_text("इलाज तैयार है। " + st.session_state.final_rx_text[:100])
     
-    if st.button("Finish & New Patient"):
+    if st.button("Finish"):
         st.session_state.clear()
         st.rerun()
-    
+        
