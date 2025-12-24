@@ -6,12 +6,11 @@ import speech_recognition as sr
 import io
 from datetime import datetime
 import PIL.Image
-import json
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Globule Goals Robot", layout="centered")
+st.set_page_config(page_title="Globule Robot", layout="centered", page_icon="💊")
 
 # CSS for KIOSK MODE
 st.markdown("""
@@ -19,34 +18,21 @@ st.markdown("""
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
-
-/* Robot Question Text */
 .big-font {
-    font-size:32px !important;
+    font-size:26px !important;
     font-weight: bold;
     color: #2E86C1;
     text-align: center;
-    line-height: 1.4;
     margin-bottom: 20px;
-    font-family: 'Arial', sans-serif;
 }
-
-/* User Answer Text */
 .user-text {
-    font-size:20px;
+    font-size:18px;
     color: #333;
-    background-color: #e8f4f8;
+    background-color: #f0f2f6;
     padding: 15px;
-    border-radius: 12px;
+    border-radius: 10px;
     margin: 10px 0;
     border-left: 5px solid #2E86C1;
-}
-
-/* Button Styling */
-.stButton button {
-    height: 3em;
-    width: 100%;
-    font-size: 20px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -54,19 +40,18 @@ header {visibility: hidden;}
 # --- 2. CONNECT TO GOOGLE & DATABASE ---
 
 # A. Gemini AI Setup
-if "GEMINI_API_KEY" in st.secrets:
+try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    st.error("Error: GEMINI_API_KEY missing.")
+except Exception as e:
+    st.error(f"AI Error: {e}")
     st.stop()
 
 # B. Google Sheets Connection
 def get_google_sheet():
     try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
         client = gspread.authorize(creds)
         return client.open("globule_database").sheet1
     except Exception as e:
@@ -78,30 +63,32 @@ def find_patient(reg_no):
     if sheet:
         try:
             cell = sheet.find(str(reg_no))
-            if cell:
-                row_values = sheet.row_values(cell.row)
-                if len(row_values) >= 4:
-                    return row_values
-        except gspread.exceptions.CellNotFound:
+            # Get the whole row
+            return sheet.row_values(cell.row)
+        except:
             return None
     return None
 
-def save_patient(reg_no, name, phone, last_rx):
+def save_patient(reg_no, name, phone, last_rx, notes=""):
     sheet = get_google_sheet()
     if sheet:
         date_now = datetime.now().strftime("%Y-%m-%d")
         try:
             cell = sheet.find(str(reg_no))
+            # Update Existing
             sheet.update_cell(cell.row, 4, last_rx)
             sheet.update_cell(cell.row, 5, date_now)
-        except gspread.exceptions.CellNotFound:
-            sheet.append_row([str(reg_no), name, str(phone), last_rx, date_now])
+            sheet.update_cell(cell.row, 6, notes) # Save notes in Col F
+        except:
+            # Create New: RegNo, Name, Phone, Rx, Date, Notes
+            sheet.append_row([str(reg_no), name, str(phone), last_rx, date_now, notes])
 
 # --- 3. AUDIO FUNCTIONS ---
-
 def speak_text(text):
     try:
-        tts = gTTS(text=text, lang='hi', slow=False)
+        # Only speak the first sentence to be fast
+        short_text = text.split('.')[0]
+        tts = gTTS(text=short_text, lang='hi', slow=False)
         audio_bytes = io.BytesIO()
         tts.write_to_fp(audio_bytes)
         st.audio(audio_bytes, format='audio/mp3', autoplay=True)
@@ -114,7 +101,7 @@ def recognize_audio(audio_bytes):
         audio_file = io.BytesIO(audio_bytes)
         with sr.AudioFile(audio_file) as source:
             audio_data = r.record(source)
-            text = r.recognize_google(audio_data, language="hi-IN")
+            text = r.recognize_google(audio_data, language="hi-IN") # Hindi input
         return text
     except:
         return None
@@ -123,246 +110,200 @@ def recognize_audio(audio_bytes):
 if "step" not in st.session_state: st.session_state.step = 0
 if "case_data" not in st.session_state: st.session_state.case_data = {}
 if "patient_type" not in st.session_state: st.session_state.patient_type = "Chronic"
-if "last_audio_id" not in st.session_state: st.session_state.last_audio_id = None
 
 # --- 5. APP FLOW ---
 
-st.image("https://cdn-icons-png.flaticon.com/512/3774/3774299.png", width=80) 
+st.image("https://cdn-icons-png.flaticon.com/512/3774/3774299.png", width=60) 
 st.markdown("<h2 style='text-align: center;'>Dr. Robot (Globule Goals)</h2>", unsafe_allow_html=True)
 
-# STEP 0: RECEPTION (TRIAGE)
+# STEP 0: RECEPTION
 if st.session_state.step == 0:
     st.markdown('<p class="big-font">नमस्ते! इलाज शुरू करने के लिए चुनें।</p>', unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("नया मरीज (New Case)"):
-            st.session_state.patient_type = "Chronic" # Full Case
-            st.session_state.step = 1
-            st.rerun()
-            
-    with col2:
-        if st.button("चोट / बुखार (Acute)"):
-            st.session_state.patient_type = "Acute"   # Fast Case
-            st.session_state.step = 1
-            st.rerun()
-            
-    with col3:
-        if st.button("पुराना मरीज (Follow-up)"):
-            st.session_state.patient_type = "Old"
-            st.session_state.step = 1
-            st.rerun()
+    c1, c2, c3 = st.columns(3)
+    if c1.button("नया (New Case)"):
+        st.session_state.patient_type = "Chronic"
+        st.session_state.step = 1
+        st.rerun()
+    if c2.button("चोट/बुखार (Acute)"):
+        st.session_state.patient_type = "Acute"
+        st.session_state.step = 1
+        st.rerun()
+    if c3.button("पुराना (Follow-up)"):
+        st.session_state.patient_type = "Old"
+        st.session_state.step = 1
+        st.rerun()
 
-# STEP 1: REGISTRATION
+# STEP 1: REGISTRATION / LOOKUP
 if st.session_state.step == 1:
     if st.session_state.patient_type in ["Chronic", "Acute"]:
-        st.markdown('<p class="big-font">विवरण भरें।</p>', unsafe_allow_html=True)
-        reg_no = datetime.now().strftime("%d%H%M") 
-        st.info(f"Reg No: **{reg_no}**")
+        st.markdown('<p class="big-font">नाम और नंबर बताएं</p>', unsafe_allow_html=True)
+        reg_no = datetime.now().strftime("%d%H%M")
         
-        with st.form("new_patient"):
+        with st.form("new_pt"):
             name = st.text_input("Name")
             phone = st.text_input("Mobile")
-            submit = st.form_submit_button("Start Case")
-            
-            if submit and name:
-                st.session_state.case_data["Name"] = name
-                st.session_state.case_data["RegNo"] = reg_no
-                st.session_state.case_data["Phone"] = phone
-                save_patient(reg_no, name, phone, "Case Started")
-                speak_text(f"स्वागत है {name}. चलिए शुरू करते हैं।")
+            if st.form_submit_button("Start Case"):
+                st.session_state.case_data = {"Name": name, "RegNo": reg_no, "Phone": phone}
+                save_patient(reg_no, name, phone, "Started")
                 st.session_state.step = 2
                 st.rerun()
-
-    else: # OLD PATIENT
-        st.markdown('<p class="big-font">रजिस्ट्रेशन नंबर लिखें।</p>', unsafe_allow_html=True)
+                
+    else: # OLD PATIENT LOGIC
+        st.markdown('<p class="big-font">रजिस्ट्रेशन नंबर लिखें</p>', unsafe_allow_html=True)
         reg_input = st.text_input("Reg No:")
         if st.button("Search"):
-            data = find_patient(reg_input) 
+            data = find_patient(reg_input)
             if data:
-                name = data[1]
-                last_rx = data[3]
-                st.session_state.case_data["Name"] = name
-                st.session_state.case_data["RegNo"] = reg_input
-                st.session_state.case_data["LastRx"] = last_rx
-                
-                msg = f"स्वागत है {name}. पिछली बार दवा {last_rx} दी थी।"
-                speak_text(msg)
-                st.session_state.step = 15 # Follow Up
+                # Load Data
+                st.session_state.case_data = {
+                    "RegNo": data[0], 
+                    "Name": data[1], 
+                    "Phone": data[2], 
+                    "LastRx": data[3] if len(data) > 3 else "None"
+                }
+                st.success(f"Found: {data[1]}")
+                st.session_state.step = 15 # Go to Follow-up
                 st.rerun()
             else:
-                st.error("Patient Not Found.")
+                st.error("Patient Not Found")
 
-# STEP 2-9: QUESTIONS (SMART LOGIC)
+# STEP 2-8: MAIN INTERVIEW (New/Acute)
 steps_map = {
     2: "मुख्य समस्या क्या है? (Chief Complaint)",
     3: "यह कब शुरू हुआ? (Onset)",
     4: "कब बढ़ता या घटता है? (Modalities)",
     5: "कोई और तकलीफ? (Concomitants)",
-    6: "पुरानी बीमारी या ऑपरेशन? (History)",
+    6: "पुरानी बीमारी या इतिहास? (History)",
     7: "प्यास और भूख कैसी है? (Generals)",
     8: "स्वभाव कैसा है? (Mentals)",
 }
 
-# ACUTE LOGIC: Stop after Q5. CHRONIC: Go to Q8.
 last_step = 5 if st.session_state.patient_type == "Acute" else 8
 
 if 2 <= st.session_state.step <= last_step:
     current_q = steps_map[st.session_state.step]
     st.markdown(f'<p class="big-font">{current_q}</p>', unsafe_allow_html=True)
     
-    if f"spoken_{st.session_state.step}" not in st.session_state:
-        speak_text(current_q)
-        st.session_state[f"spoken_{st.session_state.step}"] = True
+    # Text Input Backup (Because Audio fails on mobile sometimes)
+    text_input = st.chat_input("Type answer here if mic fails...")
     
-    audio = mic_recorder(start_prompt="बोलिये (Speak)", stop_prompt="रुकिए (Stop)", key=f"mic_{st.session_state.step}")
+    # Audio Input
+    audio = mic_recorder(start_prompt="🎤 Speak", stop_prompt="⏹ Stop", key=f"mic_{st.session_state.step}")
     
-    if audio and audio['id'] != st.session_state.last_audio_id:
-        st.session_state.last_audio_id = audio['id']
-        text = recognize_audio(audio['bytes'])
-        if text:
-            st.markdown(f'<p class="user-text">{text}</p>', unsafe_allow_html=True)
-            st.session_state.case_data[f"Q{st.session_state.step}"] = text
-            if st.button("Next"):
-                st.session_state.step += 1
-                
-                # CHECK: Are we done with questions?
-                is_done_questioning = (st.session_state.patient_type == "Acute" and st.session_state.step > 5) or (st.session_state.step > 8)
-                
-                if is_done_questioning:
-                    # SMART CAMERA LOGIC: Check for Skin Keywords
-                    all_text = " ".join([str(v) for k,v in st.session_state.case_data.items()]).lower()
-                    skin_keywords = ["skin", "rash", "khujli", "daad", "eczema", "psoriasis", "acne", "muhase", "chale", "ulcer", "boil", "foda", "jalan", "fungal", "ringworm", "wounds", "safed", "dag", "spot", "chehra", "face"]
-                    
-                    is_skin_case = any(word in all_text for word in skin_keywords)
-                    st.session_state.image_type = "Lesion" if is_skin_case else "Tongue"
-                    st.session_state.step = 10 # Go to Camera
-                    
-                st.rerun()
-
-# STEP 15: FOLLOW UP
-if st.session_state.step == 15:
-    q = "दवा के बाद क्या बदलाव आया?"
-    st.markdown(f'<p class="big-font">{q}</p>', unsafe_allow_html=True)
-    audio = mic_recorder(start_prompt="Speak", stop_prompt="Stop", key="mic_fu")
-    if audio and audio['id'] != st.session_state.last_audio_id:
-        st.session_state.last_audio_id = audio['id']
-        text = recognize_audio(audio['bytes'])
-        if text:
-            st.session_state.case_data["FollowUp_Report"] = text
-            st.session_state.step = 10
+    user_response = None
+    
+    if text_input:
+        user_response = text_input
+    elif audio:
+        user_response = recognize_audio(audio['bytes'])
+    
+    if user_response:
+        st.markdown(f'<p class="user-text">{user_response}</p>', unsafe_allow_html=True)
+        st.session_state.case_data[f"Q{st.session_state.step}"] = user_response
+        
+        # Next Button Logic
+        if st.button("Next Question ->", type="primary"):
+            st.session_state.step += 1
+            # Check if done
+            is_done = (st.session_state.patient_type == "Acute" and st.session_state.step > 5) or (st.session_state.step > 8)
+            if is_done:
+                st.session_state.step = 10 # Go to Camera
             st.rerun()
 
-# STEP 10: SMART CAMERA (Context Aware)
+# STEP 15: FOLLOW-UP (SPECIAL KEYNOTE LOGIC)
+if st.session_state.step == 15:
+    name = st.session_state.case_data.get('Name')
+    last_rx = st.session_state.case_data.get('LastRx')
+    
+    st.markdown(f'<p class="big-font">Welcome back {name}.<br>Last Medicine: {last_rx}</p>', unsafe_allow_html=True)
+    
+    # A. General Update
+    st.write("1. दवा लेने के बाद कैसा महसूस हुआ? (General Update)")
+    fu_gen = st.text_input("Answer 1")
+    
+    # B. AI Generates KEYNOTE QUESTIONS based on Last Rx
+    if "keynote_q" not in st.session_state:
+        with st.spinner("Analyzing Last Prescription..."):
+            prompt = f"Patient took {last_rx}. Create 1 simple 'Yes/No' question in Hindi based on the Keynote of this remedy to check if the symptom still exists."
+            res = model.generate_content(prompt)
+            st.session_state.keynote_q = res.text
+            
+    st.write(f"2. Specific Check: {st.session_state.keynote_q}")
+    fu_keynote = st.text_input("Answer 2 (Yes/No)")
+    
+    if st.button("Analyze Follow-up"):
+        if fu_gen:
+            st.session_state.case_data["FollowUp_Report"] = f"General: {fu_gen}. Keynote Check ({st.session_state.keynote_q}): {fu_keynote}"
+            st.session_state.step = 11 # Go to Analysis
+            st.rerun()
+
+# STEP 10: CAMERA
 if st.session_state.step == 10:
-    img_type = st.session_state.get("image_type", "Tongue")
+    st.markdown('<p class="big-font">जीभ या चेहरे की फोटो (Tongue/Face)</p>', unsafe_allow_html=True)
+    img = st.camera_input("Camera")
     
-    if img_type == "Lesion":
-        msg = "कृपया अपनी त्वचा/समस्या दिखाएं। (Show Skin)"
-        st.warning("Note: Keep phone 30cm away for focus.")
-    else:
-        msg = "जीभ बाहर निकालें (Tongue Diagnosis)."
-        st.warning("Note: Do not get too close.")
-        
-    st.markdown(f'<p class="big-font">{msg}</p>', unsafe_allow_html=True)
-    speak_text(msg)
-    
-    img = st.camera_input("Camera", label_visibility="collapsed")
+    c1, c2 = st.columns(2)
     if img:
-        st.session_state.case_data["Face_Img"] = img
+        st.session_state.case_data["Img"] = img
         st.session_state.step = 11
         st.rerun()
-    
-    if st.button("Skip Photo (Low Light / Privacy)"):
-        st.session_state.case_data["Face_Img"] = None
+    if c2.button("Skip Photo"):
+        st.session_state.case_data["Img"] = None
         st.session_state.step = 11
         st.rerun()
 
-# STEP 11: AI ANALYSIS (Hybrid Mode)
+# STEP 11: FINAL ANALYSIS
 if st.session_state.step == 11:
-    st.markdown('<p class="big-font">Analyzing...</p>', unsafe_allow_html=True)
-    if "dd_questions" not in st.session_state:
-        with st.spinner("Dr. Robot is diagnosing..."):
+    st.markdown('<p class="big-font">Dr. Robot Thinking...</p>', unsafe_allow_html=True)
+    
+    if "final_rx" not in st.session_state:
+        with st.spinner("Analyzing Miasms & Rubrics..."):
             
-            has_image = st.session_state.case_data.get("Face_Img") is not None
-            img_type = st.session_state.get("image_type", "Tongue")
+            # Prepare Data
+            pt_data = str(st.session_state.case_data)
+            has_img = st.session_state.case_data.get("Img") is not None
             
-            # PROMPT CONSTRUCTION
             prompt = f"""
-            Act as Expert Homeopath (BHMS).
-            Patient Data: {str(st.session_state.case_data)}
-            Case Type: {st.session_state.patient_type}
+            You are an expert Homeopath.
+            Analyze this case carefully.
             
-            INSTRUCTIONS:
-            {' - IMAGE PROVIDED: Analyze the ' + img_type + ' visually.' if has_image else ' - NO IMAGE: Rely 100% on Patient Speech & Symptoms.'}
-            - If Acute: Focus on Causation & Modalities.
-            - If Chronic: Focus on Constitution & Miasm.
+            PATIENT DATA: {pt_data}
             
             TASK:
-            1. Analyze Symptoms {'+ Visual Signs' if has_image else ''}.
-            2. Select Top Remedy.
-            3. Ask 2 Tie-Breaker Questions (Hindi).
-            
-            Respond JSON: {{ "analysis": "...", "questions": "..." }}
+            1. Analyze the Mental & Physical Generals.
+            2. If this is a Follow-up, decide if the remedy needs to be repeated (Placebo/SL) or changed based on the Keynote answer.
+            3. Suggest ONE Final Remedy with Potency and Dosage.
+            4. Explain WHY in simple Hindi/English mix.
             """
             
             try:
-                if has_image:
-                    img = PIL.Image.open(st.session_state.case_data["Face_Img"])
-                    res = model.generate_content([prompt, img])
+                if has_img:
+                    img_file = PIL.Image.open(st.session_state.case_data["Img"])
+                    response = model.generate_content([prompt, img_file])
                 else:
-                    res = model.generate_content(prompt)
+                    response = model.generate_content(prompt)
                 
-                data = json.loads(res.text.replace("```json","").replace("```",""))
-                st.session_state.dd_questions = data["questions"]
-                st.session_state.analysis = data["analysis"]
-            except:
-                st.session_state.dd_questions = "और कुछ बताना चाहेंगे?"
+                st.session_state.final_rx_text = response.text
+                
+                # Extract Remedy Name (First line usually)
+                rx_short = response.text.splitlines()[0]
+                save_patient(
+                    st.session_state.case_data["RegNo"],
+                    st.session_state.case_data.get("Name"),
+                    st.session_state.case_data.get("Phone"),
+                    rx_short,
+                    notes=response.text[:200]
+                )
+                
+            except Exception as e:
+                st.session_state.final_rx_text = f"Error: {e}"
 
-    st.markdown(f'<p class="big-font">{st.session_state.dd_questions}</p>', unsafe_allow_html=True)
-    speak_text(st.session_state.dd_questions)
+    st.success("Prescription Generated!")
+    st.write(st.session_state.final_rx_text)
+    speak_text("इलाज तैयार है। " + st.session_state.final_rx_text[:100])
     
-    audio = mic_recorder(start_prompt="Speak", stop_prompt="Stop", key="mic_dd")
-    if audio and audio['id'] != st.session_state.last_audio_id:
-        st.session_state.last_audio_id = audio['id']
-        ans = recognize_audio(audio['bytes'])
-        if ans:
-            st.session_state.case_data["DD_Answer"] = ans
-            st.session_state.step = 12
-            st.rerun()
-
-# STEP 12: PRESCRIPTION
-if st.session_state.step == 12:
-    if "prescription" not in st.session_state:
-        with st.spinner("Writing Prescription..."):
-            prompt = f"""
-            Finalize Case.
-            Analysis: {st.session_state.get('analysis')}
-            Patient Answer: {st.session_state.case_data.get('DD_Answer')}
-            
-            Output:
-            1. REMEDY NAME & POTENCY (e.g., Nux Vomica 200).
-            2. DOSAGE.
-            3. REASON (Hindi).
-            """
-            res = model.generate_content(prompt)
-            st.session_state.prescription = res.text
-            
-            # Save to Sheet
-            rx_name = res.text.split('\n')[0][:50]
-            save_patient(
-                st.session_state.case_data["RegNo"],
-                st.session_state.case_data.get("Name","Unknown"),
-                st.session_state.case_data.get("Phone","000"),
-                rx_name
-            )
-            
-    rx = st.session_state.prescription
-    st.markdown(f'<div class="user-text">{rx}</div>', unsafe_allow_html=True)
-    speak_text("आपका इलाज तैयार है। " + rx[:100])
-    
-    if st.button("New Patient"):
+    if st.button("Finish & New Patient"):
         st.session_state.clear()
         st.rerun()
-                         
+    
