@@ -1,0 +1,9 @@
+streamlit
+google-generativeai
+gTTS
+SpeechRecognition
+streamlit-mic-recorder
+Pillow
+pandas
+gspread
+oauth2client
