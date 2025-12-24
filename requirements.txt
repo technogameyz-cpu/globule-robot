@@ -1,9 +1,9 @@
 streamlit
 google-generativeai
-gTTS
-SpeechRecognition
+gtts
 streamlit-mic-recorder
-Pillow
-pandas
+SpeechRecognition
 gspread
-oauth2client
+google-auth
+Pillow
+
